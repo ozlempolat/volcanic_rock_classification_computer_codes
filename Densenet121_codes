@@ -1,0 +1,326 @@
+# Plutonic Rock Classification by Deep Transfer Learnning (DenseNet 121)
+# Dr. Ali POLAT & Dr. Özlem POLAT (2020)
+
+%tensorflow_version 1.x
+import keras
+import matplotlib.pyplot as plt
+import os
+import tensorflow as tf
+from keras.models import Sequential, Model, load_model
+from keras.preprocessing import image
+from keras.preprocessing.image import ImageDataGenerator
+from keras.callbacks import TensorBoard 
+from keras.applications import vgg19,vgg16,inception_v3,ResNet50,DenseNet121,xception
+from keras.utils.data_utils import get_file
+from keras.layers import Conv2D, MaxPooling2D, AveragePooling2D, Dense, Input, Dropout, Activation, Flatten, BatchNormalization,ZeroPadding2D,concatenate,Lambda,GlobalAveragePooling2D
+from keras.optimizers import Adam,SGD,RMSprop, Adadelta, Adagrad
+import glob
+import random
+import numpy as np
+from skimage import io
+import cv2 
+from sklearn.metrics import auc, roc_curve, confusion_matrix,classification_report
+import xlwt 
+workbook = xlwt.Workbook()   
+sheet1 = workbook.add_sheet("RESULTS") 
+
+from scipy import interp
+from itertools import cycle
+save_path="/content/drive/My Drive/rockresults_Vol/"
+
+rock_classes=["andezit","bazalt","dasit","latit","riyolit","trakit"]
+rock_classess=["andesite","basalt","dacite","latite","rhyolite","trachyte"]
+cc=10 # Number of cross-correlation
+num_classes = 6  # Number of classes
+batch_size = 16
+epochs =50  
+height=224 
+width=224 
+input_shape=(height, width, 3) 
+
+#optimizer=Adadelta(lr=1.0, rho=0.95, epsilon=1e-08, decay=0.0)
+#optimizer=Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, amsgrad=False)
+#optimizer=SGD(lr=0.01, momentum=0.0, nesterov=False)
+optimizer=RMSprop(lr=0.0001, rho=0.9)
+
+metric="accuracy" 
+loss="categorical_crossentropy" 
+
+# Split dataset----------------------------------------------------
+
+trainrate=0.7 # training rate
+testrate=0.3 # testing rate
+
+# ------------------------------------------------------------------------------
+# initialize train set and test set
+x_train, y_train, x_test, y_test, x_val, y_val= [], [], [], [], [], []
+# ---------------------------------------------------------------------------
+if os.path.isdir(save_path)==False:
+    os.mkdir(save_path)
+    print(save_path+" Folder created-------------------------------------")
+else:
+    print("Folder already exists..................")
+    pass
+#Results is writing to excel file ----------------------------------------------
+sheet1.write(0, 0, "Cross Corelations")   
+sheet1.write(0, 1, "Train loss")
+sheet1.write(0, 2, "Train accuracy") 
+sheet1.write(0, 3, "Test loss")
+sheet1.write(0, 4, "Test accuracy")
+sheet1.write(0, 5, "Validation loss")
+sheet1.write(0, 6, "Validation accuracy") 
+sheet1.write(0, 7, "AUC mean")
+sheet1.write(0, 8, "Sensitivity mean") 
+sheet1.write(0, 9, "Specifity mean")
+sheet1.write(0, 10, "Accuracy mean")
+
+#-------------------------------------------------------------------------------
+data = {}
+def get_files(rock_classes): #Define function to get file list, randomly shuffle it and split 70/30
+    files = glob.glob("/content/drive/My Drive/volkanik_kayac/%s/*" %rock_classes) # reading all image files in data set folder
+    random.shuffle(files)
+    training = files[:int(round(len(files)*trainrate))] 
+    prediction= files[-int(round(len(files)*testrate)):]
+    return training, prediction
+def make_sets(): 
+    for tclass in rock_classes:
+        training, prediction = get_files(tclass)
+        #Append data to training and prediction list, and generate labels 0-12
+        for item in training:
+            image1 = cv2.imread(item) #open image
+            gray=cv2.resize(image1,(height,width)) # resize  
+            gray =gray.astype(np.float32) / gray.max() # Normalization  
+            gray=image.img_to_array(gray) 
+            gray = gray.reshape((1,) + gray.shape)       
+            x_train.append(gray) #append image array to training data list
+            y_train.append(rock_classes.index(tclass))
+        for item in prediction: #repeat above process for prediction set
+            image1 = cv2.imread(item) #open image
+            gray=cv2.resize(image1,(height,width)) # resize
+            gray =gray.astype(np.float32) / gray.max() # Normalization  
+            gray=image.img_to_array(gray) 
+            gray = gray.reshape((1,) + gray.shape)    
+            x_test.append(gray)
+            y_test.append(rock_classes.index(tclass))
+            
+    return x_train, y_train, x_test, y_test
+# ----------Plot AUC Graph of model--------------------
+
+def roc_ciz(ii=0):
+    plt.close("all")
+    roc_plt=plt.figure(4)
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.plot(fpr, tpr, label='Area = {:.3f}'.format(test_result_mean[0][0]))
+        #plt.plot(fpr_rf, tpr_rf, label='RF (area = {:.3f})'.format(auc_rf))
+    plt.xlabel('False positive rate')
+    plt.ylabel('True positive rate')
+    plt.title('ROC curve')
+    plt.legend(loc='best')
+    plt.show()
+    roc_plt.savefig(save_path+"roc"+str(ii)+".jpg",dpi=150)
+  
+#---------------------Plot AUC Graph of each classes -----------------------------------------------
+def roc_ciz_all(ii=0):
+
+    # Plot linewidth.
+    lw = 2
+    # Compute ROC curve and ROC area for each class
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
+    for i in range(num_classes):
+        fpr[i], tpr[i], _ = roc_curve(y_test[:, i], test_pred3[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
+    all_fpr = np.unique(np.concatenate([fpr[i] for i in range(num_classes)]))
+
+    # interpolate all ROC curves 
+    mean_tpr = np.zeros_like(all_fpr)
+    for i in range(num_classes):
+        mean_tpr += interp(all_fpr, fpr[i], tpr[i])
+
+    # compute AUC
+    mean_tpr /= num_classes
+
+
+    # Plot all ROC curves
+    plt.close("all")
+    all_plt=plt.figure(1)
+
+
+    colors = cycle(["blue","green","red","purple","gray","pink","brown","olive","magenta",'aqua', 'darkorange', 'cornflowerblue'])
+    for i, color in zip(range(num_classes), colors):
+        plt.plot(fpr[i], tpr[i], color=color, lw=lw,
+                 label='{0} (area = {1:0.3f})'
+                 ''.format(rock_classess[i], roc_auc[i]))
+
+    plt.plot([0, 1], [0, 1], 'k--', lw=lw)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC curves of Rock Classes')
+    plt.legend(loc="lower right")
+    plt.show
+    all_plt.savefig(save_path+"all_auc"+str(ii)+".jpg",dpi=150)
+
+#----------------------------------------------------End AUC------------
+# Save Confusion MATRIX as TXT ----------------------------------------------------------
+def raporla(ii=0):
+
+  cr = classification_report(y_test.argmax(axis=1), test_pred3.argmax(axis=1), target_names=rock_classes)
+  cm = np.array2string(matrix)
+  f = open(save_path+"report"+str(ii)+".txt", 'w')
+  f.write('Plutonic Rocks \nClassification Report\n\n{}\n\nConfusion Matrix\n\n{}\n'.format(cr, cm))
+  f.close()
+#---------------------------------------------------------------------------------------------------------
+make_sets()
+y_train2=y_train
+y_train2 = np.array(y_train2, 'float32')
+y_train = keras.utils.to_categorical(y_train, num_classes)
+x_train = np.array(x_train, 'float32')
+y_train = np.array(y_train, 'float32')
+
+y_test2=y_test
+y_test2 = np.array(y_test2, 'float32')
+y_test = keras.utils.to_categorical(y_test, num_classes)
+x_test = np.array(x_test, 'float32')
+y_test = np.array(y_test, 'float32')
+    
+x_train = x_train.reshape(x_train.shape[0], height, width, 3)
+x_train = x_train.astype('float32')
+x_test = x_test.reshape(x_test.shape[0], height, width, 3)  
+x_test = x_test.astype('float32') 
+   
+print(x_train.shape[0], 'training samples')
+print(x_test.shape[0], 'test samples')
+
+    
+## ------------------------------
+
+
+# CROSS CORELATION  STARTS HERE............................
+for ii in range(cc):  
+    input_shape=(height, width, 3) # TF varken 3 boyutlu olmasi gerekiyor       
+    print("Training with DenseNet 121")
+    Agirliklar = "imagenet"  
+    WEIGHTS_PATH_NO_TOP = 'https://github.com/fchollet/deep-learning-models/releases/download/v0.2/densenet121_weights_tf_dim_ordering_tf_kernels_notop.h5'
+    fname = 'densenet121_weights_tf_dim_ordering_tf_kernels_notop.h5'
+    DenseNet = DenseNet121(weights=Agirliklar, include_top=False, input_shape=input_shape)
+    DenseNet.load_weights(get_file(fname, WEIGHTS_PATH_NO_TOP, cache_subdir='models'))
+    add_model = Sequential()
+    add_model.add(Flatten())
+    add_model.add(BatchNormalization())
+    add_model.add(Dense(16, activation='relu'))
+    add_model.add(Dropout(0.0))
+    add_model.add(BatchNormalization())
+
+    add_model.add(Dense(num_classes, activation='softmax'))
+    
+    model = Model(inputs=DenseNet.input, outputs=add_model(DenseNet.output))
+    model.compile(loss=loss, optimizer=optimizer, metrics=[metric])
+    print("DenseNet 121 network was created successfully")
+
+##### TRAINING-----------------------------------  
+
+    history = model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size)
+            
+            
+        # saving model
+    no=ii+1
+    #fnm=save_path+"model_"+str(no)+".json"
+    #model_json = model.to_json()
+    #with open(fnm, "w") as json_file:
+      #json_file.write(model_json)
+      # serialize weights to HDF5
+    #fnm1=save_path+"Weights_"+str(no)+".h5"
+    #model.save_weights(fnm1)
+    #print("Saved model to disk")
+
+    
+    ## ------------------------------
+    ##overall evaluation
+    train_score = model.evaluate(x_train, y_train)
+    test_score = model.evaluate(x_test, y_test)
+
+    
+    # Excele yazdiriyorum sonuclari 
+
+    sheet1.write(no, 0, no)  #cc sayısı
+    sheet1.write(no, 1, train_score[0]) 
+    sheet1.write(no, 2, 100*train_score[1]) # istemiyosaniz 100 ile carpmayin 0.89 gozukur
+    sheet1.write(no, 3, test_score[0]) 
+    sheet1.write(no, 4, 100*test_score[1]) 
+
+    
+    print('Train loss:', train_score[0],'Train accuracy:', 100*train_score[1])
+    
+    print('Test loss:', test_score[0],'Test accuracy:', 100*test_score[1])
+    
+    #   Plotting loss and accuracy..................................
+    #---------------------ACC------------------------------------
+    plt.close("all")
+    acc_plt=plt.figure(2)
+    plt.plot(history.history['accuracy'])
+    
+    plt.title('model accuracy')
+    plt.ylabel('accuracy')
+    plt.xlabel('epoch')
+    plt.legend(['train', 'test'], loc='upper left')
+    plt.show()
+    acc_plt.savefig(save_path+"acc"+str(no)+".jpg",dpi=150)
+
+    #------------loss-----------------------------------------------------
+    plt.close("all")
+    loss_plt=plt.figure(3)
+    plt.plot(history.history['loss'])
+    
+    plt.title('model loss')
+    plt.ylabel('loss')
+    plt.xlabel('epoch')
+    plt.legend(['train', 'test'], loc='upper left')
+    plt.show()
+    loss_plt.savefig(save_path+"loss"+str(no)+".jpg",dpi=150)         
+    # =====================ROC Values======================================
+    test_pred= model.predict(x_test)
+    test_pred2=np.argmax(test_pred,axis=1)
+    test_pred2 = np.array(test_pred2, 'float32')
+    test_pred3 = keras.utils.to_categorical(test_pred2, num_classes)
+
+    test_result=np.zeros((num_classes, 4)) # 
+    test_result_mean=np.zeros((1, 4)) # 
+    # calculating mean value
+    for i in range(num_classes):
+        fpr, tpr, thresholds = roc_curve(y_test[:,i], test_pred3[:,i])
+        auc_t=auc(fpr, tpr)
+        tn, fp, fn, tp =confusion_matrix(y_test[:,i], test_pred3[:,i]).ravel()
+        sen_test=tp/(tp+fn)
+        spec_test=tn/(fp+tn)
+        acc_test=(tp+tn)/(tp+tn+fp+fn)   
+        test_result[i][0]=auc_t  # Auc
+        test_result[i][1]=sen_test # sensitivity
+        test_result[i][2]=spec_test #specificity
+        test_result[i][3]=acc_test #accuracy
+    test_result_mean=np.mean(test_result, axis=0) # mean of 12 classes
+    test_result_mean=np.reshape(test_result_mean, (1, 4)) # horizontal matrix
+    
+    sheet1.write(no, 7, test_result_mean[0][0]) 
+    sheet1.write(no, 8, test_result_mean[0][1]) 
+    sheet1.write(no, 9, test_result_mean[0][2]) 
+    sheet1.write(no, 10, test_result_mean[0][3])
+
+    matrix = confusion_matrix(y_test.argmax(axis=1), test_pred3.argmax(axis=1))
+    print(matrix) 
+    
+    
+    roc_ciz(no)# save ROC graph
+    roc_ciz_all(no)# save ROC graph of all 
+    raporla(no)# save results as txt
+      
+#-----------------------------------------------------------------    
+    
+    # Delete Model
+    del model
+        
+    
+
+    workbook.save(save_path+"ROCKRESULT.xls") # save results to excel file
